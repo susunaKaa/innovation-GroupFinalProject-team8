@@ -11,6 +11,7 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    https: true, // ★ 手机端 getUserMedia 必须 HTTPS
     proxy: {
       '/api': {
         target: 'http://localhost:8000',

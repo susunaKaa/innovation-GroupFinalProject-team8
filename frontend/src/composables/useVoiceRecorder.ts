@@ -1,14 +1,8 @@
 /**
  * useVoiceRecorder — 微信式语音录制逻辑
  *
- * 功能：
- * - 使用 MediaRecorder API 录制音频
- * - 上滑检测（距起始点 > 80px 视为取消）
- * - 按住说话、松开发送、上滑取消
- * - 录音时长显示
- * - 录音过短提示（< 1 秒）
- * - 上传音频文件到后端
- * - 轮询转写状态
+ * 简化版：单次 getUserMedia，避免双重调用消耗用户手势
+ * 功能：按住说话/松开发送/上滑取消/时长显示/过短提示
  */
 import { ref, computed, onUnmounted } from 'vue'
 import { uploadVoiceApi, getVoiceStatusApi, getVoiceDetailApi } from '@/api/voice'
@@ -20,10 +14,10 @@ export interface VoiceRecorderResult {
   extra: VoiceMessageExtra
 }
 
-const MIN_RECORD_DURATION = 1 // 最短录音时长（秒）
-const CANCEL_DISTANCE = 80 // 上滑取消阈值（像素）
-const POLL_INTERVAL = 2000 // 转写状态轮询间隔（毫秒）
-const MAX_POLL_TIME = 120000 // 最大轮询时间（毫秒）
+const MIN_RECORD_DURATION = 1
+const CANCEL_DISTANCE = 80
+const POLL_INTERVAL = 2000
+const MAX_POLL_TIME = 120000
 
 export function useVoiceRecorder() {
   const state = ref<VoiceRecorderState>('idle')
@@ -33,9 +27,9 @@ export function useVoiceRecorder() {
   const chunks = ref<Blob[]>([])
   const startY = ref(0)
   const startX = ref(0)
-  const currentY = ref(0)
   const timer = ref<ReturnType<typeof setInterval> | null>(null)
-  const isProcessing = ref(false) // 防止 stopRecording 重入
+  const isProcessing = ref(false)
+  const lastError = ref('')
 
   const isRecording = computed(() => state.value === 'recording')
   const isCancelling = computed(() => state.value === 'cancelling')
@@ -46,7 +40,7 @@ export function useVoiceRecorder() {
     return `${mins.toString().padStart(2, '0')}:${remainSecs.toString().padStart(2, '0')}`
   })
 
-  /** 停止所有轨道 */
+  /** -- 内部: 释放流 -- */
   function stopStreamTracks() {
     if (streamRef.value) {
       streamRef.value.getTracks().forEach((t) => t.stop())
@@ -54,37 +48,24 @@ export function useVoiceRecorder() {
     }
   }
 
-  /** 清除计时器 */
+  /** -- 内部: 清除计时器 -- */
   function clearTimer() {
-    if (timer.value) {
-      clearInterval(timer.value)
-      timer.value = null
-    }
+    if (timer.value) { clearInterval(timer.value); timer.value = null }
   }
 
-  /** 检查麦克风权限 */
-  async function checkPermission(): Promise<boolean> {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      stream.getTracks().forEach((t) => t.stop())
-      return true
-    } catch (err: any) {
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        return false
-      }
-      throw err
-    }
-  }
-
-  /** 开始录音 */
-  async function startRecording() {
+  /** -- 开始录音（核心：只调一次 getUserMedia） -- */
+  async function startRecording(): Promise<void> {
     if (state.value !== 'idle') return
+    if (isProcessing.value) return
 
+    // 先设置状态，让 UI 立即有反馈（用户松开前不会调用 getUserMedia）
+    // 但实际上 getUserMedia 需要用户手势，所以我们在这里调
     try {
+      // ★ 只这一次 getUserMedia
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       streamRef.value = stream
 
-      // 按优先级选择 MIME 类型：webm opus > webm > mp4 (iOS) > 默认
+      // 选择 MIME 类型
       let mimeType = ''
       if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
         mimeType = 'audio/webm;codecs=opus'
@@ -93,7 +74,6 @@ export function useVoiceRecorder() {
       } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
         mimeType = 'audio/mp4'
       }
-      // 如果不支持任何已知类型，MediaRecorder 会使用浏览器默认
 
       const recorder = mimeType
         ? new MediaRecorder(stream, { mimeType })
@@ -104,112 +84,87 @@ export function useVoiceRecorder() {
         if (e.data.size > 0) chunks.value.push(e.data)
       }
 
-      recorder.onstop = () => {
-        stopStreamTracks()
-      }
-
-      // 每秒收集一个数据块
-      recorder.start(1000)
+      recorder.start(1000) // 每秒收集一个 chunk
       mediaRecorder.value = recorder
       state.value = 'recording'
       duration.value = 0
 
-      // 计时器
-      timer.value = setInterval(() => {
-        duration.value += 1
-      }, 1000)
+      // 启动计时
+      timer.value = setInterval(() => { duration.value += 1 }, 1000)
     } catch (err: any) {
-      stopStreamTracks()
+      // 友好错误信息
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        throw new Error('麦克风权限被拒绝，请在浏览器设置中允许访问麦克风')
+        lastError.value = '麦克风权限被拒绝，请在浏览器设置中允许访问麦克风。\n提示：手机端访问需使用 HTTPS 或 localhost。'
+      } else if (err.name === 'NotFoundError') {
+        lastError.value = '未检测到麦克风设备'
+      } else if (err.name === 'NotReadableError') {
+        lastError.value = '麦克风被其他应用占用'
+      } else {
+        lastError.value = `无法启动录音：${err.message || '未知错误'}`
       }
-      throw err
+      state.value = 'idle'
+      throw new Error(lastError.value)
     }
   }
 
-  /** 处理触摸移动（上滑检测） */
+  /** -- 处理移动 -- */
   function handleMove(clientY: number) {
     if (state.value !== 'recording' && state.value !== 'cancelling') return
     const deltaY = startY.value - clientY
-    currentY.value = clientY
-
-    if (deltaY > CANCEL_DISTANCE) {
-      state.value = 'cancelling'
-    } else {
-      state.value = 'recording'
-    }
+    state.value = deltaY > CANCEL_DISTANCE ? 'cancelling' : 'recording'
   }
 
-  /** 设置起始位置 */
+  /** -- 设置起始位置 -- */
   function setStartPosition(x: number, y: number) {
-    startX.value = x
-    startY.value = y
-    currentY.value = y
+    startX.value = x; startY.value = y
   }
 
-  /** 停止录音并返回结果，或取消录音返回 null */
+  /** -- 停止录音 -- */
   async function stopRecording(): Promise<VoiceRecorderResult | null> {
     if (!mediaRecorder.value) return null
-    if (isProcessing.value) return null // 防重入
+    if (isProcessing.value) return null
 
     isProcessing.value = true
-
-    // 先清理计时器
     clearTimer()
 
-    // 先保存状态快照，因为 state 会在回调中被修改
     const wasCancelling = state.value === 'cancelling'
     const dur = duration.value
     const savedChunks = [...chunks.value]
+    const recorder = mediaRecorder.value
+    mediaRecorder.value = null // 立即解除引用
 
-    // 需要等待 onstop 回调完成
     return new Promise((resolve) => {
-      const recorder = mediaRecorder.value!
-      // 解除引用，防止后续再次访问
-      mediaRecorder.value = null
-
       recorder.onstop = async () => {
-        // 停止流（可能已在 recorder.onstop 中处理过，但确保清理）
         stopStreamTracks()
 
         if (wasCancelling) {
           state.value = 'cancelled'
           isProcessing.value = false
           resolve(null)
-          setTimeout(() => {
-            state.value = 'idle'
-            duration.value = 0
-          }, 1500)
+          setTimeout(() => { state.value = 'idle'; duration.value = 0 }, 1500)
           return
         }
 
-        // 检查录音是否过短
         if (dur < MIN_RECORD_DURATION) {
           state.value = 'too_short'
           isProcessing.value = false
           resolve(null)
-          setTimeout(() => {
-            state.value = 'idle'
-            duration.value = 0
-          }, 2000)
+          setTimeout(() => { state.value = 'idle'; duration.value = 0 }, 2000)
           return
         }
 
-        // 创建音频 Blob (使用录制时实际 MIME 类型)
-        const mimeType = recorder.mimeType || 'audio/webm'
-        const blob = new Blob(savedChunks, { type: mimeType })
-
-        // 状态先回到 idle，UI 不再显示录制状态
+        // 回到 idle 状态
         state.value = 'idle'
+        duration.value = 0
 
         try {
-          const recordingId = await uploadAndPoll(blob, dur)
+          const blob = new Blob(savedChunks, { type: recorder.mimeType || 'audio/webm' })
+          const recordingId = await uploadAndPoll(blob)
 
           if (recordingId !== null) {
             const detail = await getVoiceDetailApi(recordingId)
             const recording = detail.data
-
-            const result: VoiceRecorderResult = {
+            resolve({
               audioBlob: blob,
               duration: dur,
               extra: {
@@ -219,86 +174,46 @@ export function useVoiceRecorder() {
                 transcript: recording.transcript || null,
                 transcript_status: recording.transcript ? 'completed' : 'completed',
               },
-            }
-            isProcessing.value = false
-            resolve(result)
+            })
           } else {
-            const result: VoiceRecorderResult = {
-              audioBlob: blob,
-              duration: dur,
-              extra: {
-                audio_url: '',
-                duration_seconds: dur,
-                recording_id: 0,
-                transcript: null,
-                transcript_status: 'failed',
-              },
-            }
-            isProcessing.value = false
-            resolve(result)
+            resolve({ audioBlob: blob, duration: dur, extra: { audio_url: '', duration_seconds: dur, recording_id: 0, transcript: null, transcript_status: 'failed' } })
           }
         } catch {
-          const result: VoiceRecorderResult = {
-            audioBlob: blob,
-            duration: dur,
-            extra: {
-              audio_url: '',
-              duration_seconds: dur,
-              recording_id: 0,
-              transcript: null,
-              transcript_status: 'failed',
-            },
-          }
-          isProcessing.value = false
-          resolve(result)
+          resolve({ audioBlob: blob, duration: dur, extra: { audio_url: '', duration_seconds: dur, recording_id: 0, transcript: null, transcript_status: 'failed' } })
         }
-
-        duration.value = 0
+        isProcessing.value = false
       }
 
-      // 停止录制：只有在 recording 状态下才调用 stop
       if (recorder.state === 'recording') {
-        // requestData 确保最后一段数据被收集
         recorder.requestData()
         recorder.stop()
-      } else if (recorder.state === 'inactive') {
-        // 已停止，直接触发 onstop
+      } else {
         recorder.dispatchEvent(new Event('stop'))
       }
     })
   }
 
-  /** 上传音频并轮询等待转写完成 */
-  async function uploadAndPoll(blob: Blob, dur: number): Promise<number | null> {
+  /** -- 上传 + 轮询 -- */
+  async function uploadAndPoll(blob: Blob): Promise<number | null> {
     try {
       const audioFile = new File([blob], `voice_${Date.now()}.webm`, { type: blob.type || 'audio/webm' })
       const uploadRes = await uploadVoiceApi(audioFile)
       const recordingId = uploadRes.data.id
 
-      // 轮询等待转写完成
       const startTime = Date.now()
       while (Date.now() - startTime < MAX_POLL_TIME) {
         await new Promise((r) => setTimeout(r, POLL_INTERVAL))
         try {
           const statusRes = await getVoiceStatusApi(recordingId)
-          const status = statusRes.data.status
-          if (status === 'completed' || status === 'transcribed') {
-            return recordingId
-          }
-          if (status === 'failed') {
-            return recordingId
-          }
-        } catch {
-          continue
-        }
+          const s = statusRes.data.status
+          if (s === 'completed' || s === 'transcribed' || s === 'failed') return recordingId
+        } catch { continue }
       }
-      return recordingId // 超时也返回，让用户看到语音气泡
-    } catch {
-      return null
-    }
+      return recordingId
+    } catch { return null }
   }
 
-  /** 重置状态 */
+  /** -- 重置 -- */
   function reset() {
     clearTimer()
     stopStreamTracks()
@@ -310,26 +225,14 @@ export function useVoiceRecorder() {
     duration.value = 0
     chunks.value = []
     isProcessing.value = false
+    lastError.value = ''
   }
 
-  onUnmounted(() => {
-    reset()
-  })
+  onUnmounted(() => reset())
 
   return {
-    state,
-    duration,
-    durationText,
-    isRecording,
-    isCancelling,
-    isProcessing,
-    checkPermission,
-    startRecording,
-    stopRecording,
-    handleMove,
-    setStartPosition,
-    reset,
+    state, duration, durationText, isRecording, isCancelling, isProcessing, lastError,
+    startRecording, stopRecording, handleMove, setStartPosition, reset,
     MIN_RECORD_DURATION,
-    CANCEL_DISTANCE,
   }
 }
