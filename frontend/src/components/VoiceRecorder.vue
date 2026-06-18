@@ -33,10 +33,9 @@ async function onTouchStart(e: TouchEvent | MouseEvent) {
   e.preventDefault()
 
   // 检查麦克风权限
-  try {
-    await checkPermission()
-  } catch (err: any) {
-    emit('error', err.message || '无法访问麦克风')
+  const hasPermission = await checkPermission()
+  if (!hasPermission) {
+    emit('error', '麦克风权限被拒绝，请在设置中允许访问麦克风')
     return
   }
 

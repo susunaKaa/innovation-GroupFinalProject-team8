@@ -27,6 +27,13 @@ export const interviewPlugin = {
     })
 
     router.addRoute({
+      path: '/interview-create',
+      name: 'InterviewCreate',
+      component: () => import('@/views/InterviewCreateView.vue'),
+      meta: { requiresAuth: true },
+    })
+
+    router.addRoute({
       path: '/interview/:sessionId',
       name: 'Interview',
       component: () => import('@/views/InterviewView.vue'),
