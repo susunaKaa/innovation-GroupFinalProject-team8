@@ -120,22 +120,46 @@ async function handleSendText(text: string) {
 
 // ── 语音回答 ──
 async function handleVoiceResult(result: VoiceRecorderResult) {
-  try {
+  const transcript = result.extra.transcript || ''
+  const audioUrl = result.extra.audio_url || ''
+
+  // 防空保护：如果既没有转写文本也没有音频地址，提示用户
+  if (!transcript && !audioUrl) {
+    ElMessage.warning('语音上传成功，但转写结果暂未就绪。请稍后重试或使用文字输入。')
+    // 仍然展示语音气泡
     addMessage({
       role: 'user',
       type: 'answer-voice',
       content: '',
       audioUrl: result.audioBlob ? URL.createObjectURL(result.audioBlob) : '',
       durationSeconds: result.duration,
-      transcript: result.extra.transcript,
+      transcript: null,
+    })
+    scrollToBottom()
+    return
+  }
+
+  try {
+    addMessage({
+      role: 'user',
+      type: 'answer-voice',
+      content: '',
+      audioUrl: result.audioBlob ? URL.createObjectURL(result.audioBlob) : audioUrl,
+      durationSeconds: result.duration,
+      transcript: transcript || null,
     })
 
     const params: any = { answer_duration_seconds: result.duration }
-    if (result.extra.transcript) {
-      params.answer_text = result.extra.transcript
+    // 有转写文本时优先用文本，没有时用音频地址
+    if (transcript) {
+      params.answer_text = transcript
     }
-    if (result.extra.audio_url) {
-      params.answer_audio_url = result.extra.audio_url
+    if (audioUrl) {
+      params.answer_audio_url = audioUrl
+    }
+    // 兜底：如果 transcript 空但 audioUrl 有值，用占位文本使后端校验通过
+    if (!transcript && audioUrl) {
+      params.answer_text = '[语音回答]'
     }
 
     const sessionResult = await store.submitAnswer(params)

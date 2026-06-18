@@ -40,6 +40,21 @@ export function useVoiceRecorder() {
     return `${mins.toString().padStart(2, '0')}:${remainSecs.toString().padStart(2, '0')}`
   })
 
+  /** 选取最佳 MIME 类型（不用带 codecs 后缀，避免后端匹配失败） */
+  function getBestMimeType(): string {
+    if (MediaRecorder.isTypeSupported('audio/webm')) return 'audio/webm'
+    if (MediaRecorder.isTypeSupported('audio/mp4')) return 'audio/mp4'
+    if (MediaRecorder.isTypeSupported('audio/ogg')) return 'audio/ogg'
+    return ''
+  }
+
+  /** 生成安全的文件名 */
+  function getFileName(mimeType: string): string {
+    if (mimeType.includes('mp4') || mimeType.includes('m4a')) return `voice_${Date.now()}.mp4`
+    if (mimeType.includes('ogg')) return `voice_${Date.now()}.ogg`
+    return `voice_${Date.now()}.webm`
+  }
+
   /** -- 内部: 释放流 -- */
   function stopStreamTracks() {
     if (streamRef.value) {
@@ -58,23 +73,11 @@ export function useVoiceRecorder() {
     if (state.value !== 'idle') return
     if (isProcessing.value) return
 
-    // 先设置状态，让 UI 立即有反馈（用户松开前不会调用 getUserMedia）
-    // 但实际上 getUserMedia 需要用户手势，所以我们在这里调
     try {
-      // ★ 只这一次 getUserMedia
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       streamRef.value = stream
 
-      // 选择 MIME 类型
-      let mimeType = ''
-      if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-        mimeType = 'audio/webm;codecs=opus'
-      } else if (MediaRecorder.isTypeSupported('audio/webm')) {
-        mimeType = 'audio/webm'
-      } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-        mimeType = 'audio/mp4'
-      }
-
+      const mimeType = getBestMimeType()
       const recorder = mimeType
         ? new MediaRecorder(stream, { mimeType })
         : new MediaRecorder(stream)
@@ -84,15 +87,12 @@ export function useVoiceRecorder() {
         if (e.data.size > 0) chunks.value.push(e.data)
       }
 
-      recorder.start(1000) // 每秒收集一个 chunk
+      recorder.start(1000)
       mediaRecorder.value = recorder
       state.value = 'recording'
       duration.value = 0
-
-      // 启动计时
       timer.value = setInterval(() => { duration.value += 1 }, 1000)
     } catch (err: any) {
-      // 友好错误信息
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
         lastError.value = '麦克风权限被拒绝，请在浏览器设置中允许访问麦克风。\n提示：手机端访问需使用 HTTPS 或 localhost。'
       } else if (err.name === 'NotFoundError') {
@@ -131,7 +131,8 @@ export function useVoiceRecorder() {
     const dur = duration.value
     const savedChunks = [...chunks.value]
     const recorder = mediaRecorder.value
-    mediaRecorder.value = null // 立即解除引用
+    const mimeType = recorder.mimeType || 'audio/webm'
+    mediaRecorder.value = null
 
     return new Promise((resolve) => {
       recorder.onstop = async () => {
@@ -153,13 +154,12 @@ export function useVoiceRecorder() {
           return
         }
 
-        // 回到 idle 状态
         state.value = 'idle'
         duration.value = 0
 
         try {
-          const blob = new Blob(savedChunks, { type: recorder.mimeType || 'audio/webm' })
-          const recordingId = await uploadAndPoll(blob)
+          const blob = new Blob(savedChunks, { type: mimeType })
+          const recordingId = await uploadAndPoll(blob, mimeType)
 
           if (recordingId !== null) {
             const detail = await getVoiceDetailApi(recordingId)
@@ -169,17 +169,39 @@ export function useVoiceRecorder() {
               duration: dur,
               extra: {
                 audio_url: recording.file_url || '',
-                duration_seconds: recording.duration || dur,
+                duration_seconds: recording.duration_seconds || dur,
                 recording_id: recordingId,
-                transcript: recording.transcript || null,
-                transcript_status: recording.transcript ? 'completed' : 'completed',
+                transcript: recording.transcript || '',
+                transcript_status: recording.transcript ? 'completed' : 'pending',
               },
             })
           } else {
-            resolve({ audioBlob: blob, duration: dur, extra: { audio_url: '', duration_seconds: dur, recording_id: 0, transcript: null, transcript_status: 'failed' } })
+            // 上传或转写失败，但仍返回音频 blob 供本地播放
+            resolve({
+              audioBlob: blob,
+              duration: dur,
+              extra: {
+                audio_url: '',
+                duration_seconds: dur,
+                recording_id: 0,
+                transcript: '',
+                transcript_status: 'failed',
+              },
+            })
           }
-        } catch {
-          resolve({ audioBlob: blob, duration: dur, extra: { audio_url: '', duration_seconds: dur, recording_id: 0, transcript: null, transcript_status: 'failed' } })
+        } catch (err: any) {
+          console.error('[VoiceRecorder] 上传/转写异常:', err)
+          resolve({
+            audioBlob: blob,
+            duration: dur,
+            extra: {
+              audio_url: '',
+              duration_seconds: dur,
+              recording_id: 0,
+              transcript: '',
+              transcript_status: 'failed',
+            },
+          })
         }
         isProcessing.value = false
       }
@@ -194,9 +216,10 @@ export function useVoiceRecorder() {
   }
 
   /** -- 上传 + 轮询 -- */
-  async function uploadAndPoll(blob: Blob): Promise<number | null> {
+  async function uploadAndPoll(blob: Blob, mimeType: string): Promise<number | null> {
     try {
-      const audioFile = new File([blob], `voice_${Date.now()}.webm`, { type: blob.type || 'audio/webm' })
+      const fileName = getFileName(mimeType)
+      const audioFile = new File([blob], fileName, { type: mimeType })
       const uploadRes = await uploadVoiceApi(audioFile)
       const recordingId = uploadRes.data.id
 
@@ -210,7 +233,10 @@ export function useVoiceRecorder() {
         } catch { continue }
       }
       return recordingId
-    } catch { return null }
+    } catch (err) {
+      console.error('[VoiceRecorder] 上传失败:', err)
+      return null
+    }
   }
 
   /** -- 重置 -- */

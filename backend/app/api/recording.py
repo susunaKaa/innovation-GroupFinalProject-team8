@@ -92,8 +92,9 @@ async def upload_recording(
 ):
     """上传面试录音文件，触发异步 ASR 转写和分析流程"""
 
-    # 验证文件类型
-    if file.content_type not in settings.ALLOWED_AUDIO_TYPES:
+    # 验证文件类型（宽松匹配：audio/webm;codecs=opus 也通过）
+    content_type_base = file.content_type.split(';')[0].strip() if file.content_type else ''
+    if content_type_base not in settings.ALLOWED_AUDIO_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"不支持的音频格式: {file.content_type}。支持: wav, mp3, m4a, webm",
