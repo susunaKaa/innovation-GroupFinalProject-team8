@@ -1,9 +1,10 @@
 <!--
   VoiceRecorder.vue — 微信式按住说话按钮
   支持：按住说话 / 松开发送 / 上滑取消 / 录音时长 / 过短提示
+  修复：touch + mouse 双重触发导致移动端按钮无反应
 -->
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onUnmounted } from 'vue'
 import { useVoiceRecorder } from '@/composables/useVoiceRecorder'
 
 const emit = defineEmits<{
@@ -17,6 +18,7 @@ const {
   durationText,
   isRecording,
   isCancelling,
+  isProcessing,
   checkPermission,
   startRecording,
   stopRecording,
@@ -28,9 +30,36 @@ const {
 
 const btnRef = ref<HTMLElement | null>(null)
 
-/** 按下开始 */
-async function onTouchStart(e: TouchEvent | MouseEvent) {
+// 触屏事件发生后，短暂阻止 mouse 事件
+const preventMouse = ref(false)
+let mouseBlockTimer: ReturnType<typeof setTimeout> | null = null
+
+function blockMouseEvents() {
+  preventMouse.value = true
+  if (mouseBlockTimer) clearTimeout(mouseBlockTimer)
+  mouseBlockTimer = setTimeout(() => {
+    preventMouse.value = false
+  }, 500)
+}
+
+onUnmounted(() => {
+  if (mouseBlockTimer) clearTimeout(mouseBlockTimer)
+})
+
+/** 按下开始 — 统一处理 touch 和 mouse */
+async function handlePressStart(e: TouchEvent | MouseEvent, isTouch: boolean) {
   e.preventDefault()
+
+  // 触屏设备：标记阻止后续 mouse 事件
+  if (isTouch) {
+    blockMouseEvents()
+  }
+
+  // 如果 mouse 事件在 touch 之后到达，直接忽略
+  if (!isTouch && preventMouse.value) return
+
+  // 防止重复触发
+  if (state.value !== 'idle') return
 
   // 检查麦克风权限
   const hasPermission = await checkPermission()
@@ -39,22 +68,26 @@ async function onTouchStart(e: TouchEvent | MouseEvent) {
     return
   }
 
-  const clientX = e instanceof TouchEvent ? e.touches[0].clientX : e.clientX
-  const clientY = e instanceof TouchEvent ? e.touches[0].clientY : e.clientY
+  const clientX = isTouch ? (e as TouchEvent).touches[0].clientX : (e as MouseEvent).clientX
+  const clientY = isTouch ? (e as TouchEvent).touches[0].clientY : (e as MouseEvent).clientY
   setStartPosition(clientX, clientY)
   await startRecording()
 }
 
 /** 移动检测上滑 */
-function onTouchMove(e: TouchEvent | MouseEvent) {
+function handlePressMove(e: TouchEvent | MouseEvent, isTouch: boolean) {
   if (!isRecording.value && !isCancelling.value) return
-  const clientY = e instanceof TouchEvent ? e.touches[0].clientY : e.clientY
+  if (!isTouch && preventMouse.value) return
+
+  const clientY = isTouch ? (e as TouchEvent).touches[0].clientY : (e as MouseEvent).clientY
   handleMove(clientY)
 }
 
 /** 松开停止 */
-async function onTouchEnd() {
+async function handlePressEnd(isTouch: boolean) {
+  if (!isTouch && preventMouse.value) return
   if (state.value === 'idle') return
+  if (isProcessing.value) return // 防重入
 
   const result = await stopRecording()
   if (result) {
@@ -73,7 +106,7 @@ const stateLabel: Record<string, string> = {
 
 <template>
   <div class="voice-recorder">
-    <!-- 录音状态提示条 -->
+    <!-- 录音状态指示条 -->
     <Transition name="fade">
       <div v-if="isRecording || isCancelling" class="recording-indicator">
         <div class="recording-wave">
@@ -104,13 +137,14 @@ const stateLabel: Record<string, string> = {
         recording: isRecording,
         cancelling: isCancelling,
       }"
-      @mousedown="onTouchStart"
-      @mousemove="onTouchMove"
-      @mouseup="onTouchEnd"
-      @mouseleave="onTouchEnd"
-      @touchstart.prevent="onTouchStart"
-      @touchmove.prevent="onTouchMove"
-      @touchend.prevent="onTouchEnd"
+      @mousedown="handlePressStart($event, false)"
+      @mousemove="handlePressMove($event, false)"
+      @mouseup="handlePressEnd(false)"
+      @mouseleave="handlePressEnd(false)"
+      @touchstart.prevent="handlePressStart($event, true)"
+      @touchmove.prevent="handlePressMove($event, true)"
+      @touchend.prevent="handlePressEnd(true)"
+      @touchcancel.prevent="handlePressEnd(true)"
     >
       <span class="record-label">{{ stateLabel[state] || '按住 说话' }}</span>
     </button>
@@ -202,7 +236,9 @@ const stateLabel: Record<string, string> = {
   color: #606266;
   cursor: pointer;
   user-select: none;
+  -webkit-user-select: none;
   touch-action: none;
+  -webkit-touch-callout: none;
   transition: all 0.2s ease;
   display: flex;
   align-items: center;
