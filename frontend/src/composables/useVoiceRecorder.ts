@@ -5,7 +5,7 @@
  * 功能：按住说话/松开发送/上滑取消/时长显示/过短提示
  */
 import { ref, computed, onUnmounted } from 'vue'
-import { uploadVoiceApi, getVoiceStatusApi, getVoiceDetailApi } from '@/api/voice'
+import { uploadVoiceApi, getVoiceStatusApi, getVoiceDetailApi, getVoiceAnalysisApi } from '@/api/voice'
 import type { VoiceRecorderState, VoiceMessageExtra } from '@/types/voice'
 
 export interface VoiceRecorderResult {
@@ -17,7 +17,7 @@ export interface VoiceRecorderResult {
 const MIN_RECORD_DURATION = 1
 const CANCEL_DISTANCE = 80
 const POLL_INTERVAL = 2000
-const MAX_POLL_TIME = 120000
+const MAX_POLL_TIME = 180000  // 增加到 180 秒（3 分钟）
 
 export function useVoiceRecorder() {
   const state = ref<VoiceRecorderState>('idle')
@@ -157,28 +157,32 @@ export function useVoiceRecorder() {
         state.value = 'idle'
         duration.value = 0
 
+        let audioBlob: Blob | null = null
         try {
-          const blob = new Blob(savedChunks, { type: mimeType })
-          const recordingId = await uploadAndPoll(blob, mimeType)
-
+          audioBlob = new Blob(savedChunks, { type: mimeType })
+          const recordingId = await uploadAndPoll(audioBlob, mimeType)
+          
           if (recordingId !== null) {
+            // 获取录音详情（file_url）
             const detail = await getVoiceDetailApi(recordingId)
-            const recording = detail.data
+            // 轮询获取转写结果（最多等待30秒）
+            const transcription = await pollForTranscript(recordingId)
+            
             resolve({
-              audioBlob: blob,
+              audioBlob,
               duration: dur,
               extra: {
-                audio_url: recording.file_url || '',
-                duration_seconds: recording.duration_seconds || dur,
+                audio_url: detail.data.file_url || '',
+                duration_seconds: dur,
                 recording_id: recordingId,
-                transcript: recording.transcript || '',
-                transcript_status: recording.transcript ? 'completed' : 'pending',
+                transcript: transcription || '',
+                transcript_status: transcription ? 'completed' : 'pending',
               },
             })
           } else {
             // 上传或转写失败，但仍返回音频 blob 供本地播放
             resolve({
-              audioBlob: blob,
+              audioBlob,
               duration: dur,
               extra: {
                 audio_url: '',
@@ -192,7 +196,7 @@ export function useVoiceRecorder() {
         } catch (err: any) {
           console.error('[VoiceRecorder] 上传/转写异常:', err)
           resolve({
-            audioBlob: blob,
+            audioBlob: audioBlob || new Blob(savedChunks, { type: mimeType }),
             duration: dur,
             extra: {
               audio_url: '',
@@ -237,6 +241,20 @@ export function useVoiceRecorder() {
       console.error('[VoiceRecorder] 上传失败:', err)
       return null
     }
+  }
+
+  /** -- 轮询转写结果（最多等 90 秒） -- */
+  async function pollForTranscript(recordingId: number, maxWaitMs = 90000): Promise<string> {
+    const startTime = Date.now()
+    while (Date.now() - startTime < maxWaitMs) {
+      try {
+        const analysisRes = await getVoiceAnalysisApi(recordingId)
+        const transcript = analysisRes.data?.transcript || ''
+        if (transcript) return transcript
+      } catch { }
+      await new Promise((r) => setTimeout(r, 2000))
+    }
+    return ''
   }
 
   /** -- 重置 -- */

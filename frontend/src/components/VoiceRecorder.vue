@@ -13,8 +13,8 @@ const emit = defineEmits<{
 }>()
 
 const {
-  state, durationText, isRecording, isCancelling, isProcessing, lastError,
-  startRecording, stopRecording, handleMove, setStartPosition, reset,
+  state, durationText, isRecording, isCancelling, lastError,
+  startRecording, stopRecording, handleMove, setStartPosition,
   MIN_RECORD_DURATION,
 } = useVoiceRecorder()
 

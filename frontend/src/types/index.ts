@@ -199,7 +199,7 @@ export interface Recording {
 export interface RecordingResult {
   id: number
   recording_id: number
-  transcription: string
+  transcript: string
   analysis: {
     fluency: number
     clarity: number

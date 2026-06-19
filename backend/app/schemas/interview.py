@@ -25,6 +25,7 @@ class InterviewAnswerRequest(BaseModel):
     answer_text: str | None = Field(default=None, max_length=20000, description="文字回答")
     answer_audio_url: str | None = Field(default=None, max_length=512, description="音频回答地址")
     answer_duration_seconds: int | None = Field(default=None, ge=0, description="回答时长（秒）")
+    recording_id: int | None = Field(default=None, description="录音ID（用于获取转写文本）")
 
     @model_validator(mode="after")
     def validate_answer(self) -> Self:

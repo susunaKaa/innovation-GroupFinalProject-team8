@@ -6,7 +6,6 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useInterviewStore } from '@/stores/interview'
-import { ElMessage } from 'element-plus'
 
 const router = useRouter()
 const store = useInterviewStore()

@@ -3,7 +3,7 @@
   查看每题回答、评分反馈，支持下载/复制报告
 -->
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useInterviewStore } from '@/stores/interview'
 import { ElMessage } from 'element-plus'

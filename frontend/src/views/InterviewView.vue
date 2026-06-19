@@ -4,10 +4,11 @@
   支持文字和语音混合回答，统一评分流程
 -->
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, onMounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useInterviewStore } from '@/stores/interview'
+import { getVoiceAnalysisApi } from '@/api/voice'
 import ChatMessage from '@/components/ChatMessage.vue'
 import MobileInputBar from '@/components/MobileInputBar.vue'
 import VoiceMessageBubble from '@/components/VoiceMessageBubble.vue'
@@ -31,6 +32,8 @@ interface DisplayMessage {
   audioUrl?: string
   durationSeconds?: number
   transcript?: string | null
+  transcriptStatus?: 'pending' | 'converting' | 'completed' | 'failed'
+  recordingId?: number
   createdAt: number
 }
 
@@ -134,6 +137,8 @@ async function handleVoiceResult(result: VoiceRecorderResult) {
       audioUrl: result.audioBlob ? URL.createObjectURL(result.audioBlob) : '',
       durationSeconds: result.duration,
       transcript: null,
+      transcriptStatus: 'pending',
+      recordingId: result.extra.recording_id || 0,
     })
     scrollToBottom()
     return
@@ -147,19 +152,20 @@ async function handleVoiceResult(result: VoiceRecorderResult) {
       audioUrl: result.audioBlob ? URL.createObjectURL(result.audioBlob) : audioUrl,
       durationSeconds: result.duration,
       transcript: transcript || null,
+      transcriptStatus: transcript ? 'completed' : 'pending',
+      recordingId: result.extra.recording_id || 0,
     })
 
     const params: any = { answer_duration_seconds: result.duration }
-    // 有转写文本时优先用文本，没有时用音频地址
+    // 优先用转写文本，没有时留空让后端通过 audioUrl 处理
     if (transcript) {
       params.answer_text = transcript
     }
     if (audioUrl) {
       params.answer_audio_url = audioUrl
     }
-    // 兜底：如果 transcript 空但 audioUrl 有值，用占位文本使后端校验通过
-    if (!transcript && audioUrl) {
-      params.answer_text = '[语音回答]'
+    if (result.extra.recording_id) {
+      params.recording_id = result.extra.recording_id
     }
 
     const sessionResult = await store.submitAnswer(params)
@@ -195,6 +201,48 @@ async function handleVoiceResult(result: VoiceRecorderResult) {
 // ── 语音错误 ──
 function handleVoiceError(msg: string) {
   ElMessage.warning(msg)
+}
+
+// ── 语音转文字（长按触发） ──
+async function handleRequestTranscript(msgId: string, recordingId: number) {
+  if (recordingId <= 0) {
+    ElMessage.warning('录音未成功上传，无法转文字')
+    return
+  }
+
+  // 找到对应消息并标记为转写中
+  const msgIndex = messages.value.findIndex((m) => m.id === msgId)
+  if (msgIndex === -1) return
+  messages.value[msgIndex] = {
+    ...messages.value[msgIndex],
+    transcriptStatus: 'converting',
+  }
+
+  try {
+    const res = await getVoiceAnalysisApi(recordingId)
+    const transcript = res.data?.transcript || ''
+
+    if (transcript) {
+      messages.value[msgIndex] = {
+        ...messages.value[msgIndex],
+        transcript,
+        transcriptStatus: 'completed',
+      }
+      ElMessage.success('转写完成')
+    } else {
+      messages.value[msgIndex] = {
+        ...messages.value[msgIndex],
+        transcriptStatus: 'failed',
+      }
+      ElMessage.warning('暂未获取到转写结果，请稍后重试')
+    }
+  } catch (err: any) {
+    messages.value[msgIndex] = {
+      ...messages.value[msgIndex],
+      transcriptStatus: 'failed',
+    }
+    ElMessage.error(err.response?.data?.detail || '转写失败，请稍后重试')
+  }
 }
 
 // ── 结束面试 ──
@@ -283,7 +331,9 @@ watch(() => messages.value.length, scrollToBottom)
               :audio-url="msg.audioUrl || ''"
               :duration-seconds="msg.durationSeconds || 0"
               :transcript="msg.transcript || null"
-              :transcript-status="msg.transcript ? 'completed' : 'pending'"
+              :transcript-status="msg.transcriptStatus || 'pending'"
+              :recording-id="msg.recordingId || 0"
+              @request-transcript="handleRequestTranscript(msg.id, $event)"
             />
           </div>
         </div>

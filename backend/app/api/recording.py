@@ -284,6 +284,13 @@ async def get_analysis(
 
     analysis = recording.analysis_result or {}
 
+    # collected_questions 可能是 dict 或 list，统一转换为 list
+    _cq = recording.collected_questions
+    if isinstance(_cq, dict):
+        _cq = _cq.get("questions", [])
+    elif not isinstance(_cq, list):
+        _cq = []
+
     return APIResponse(
         data=RecordingAnalysisResponse(
             recording_id=recording.id,
@@ -293,7 +300,7 @@ async def get_analysis(
             speech_rate=analysis.get("speech_rate"),
             key_points=analysis.get("key_points", []),
             suggestions=analysis.get("suggestions", []),
-            collected_questions=recording.collected_questions,
+            collected_questions=_cq,
         ),
     )
 

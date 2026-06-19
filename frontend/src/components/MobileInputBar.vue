@@ -26,10 +26,6 @@ const inputText = ref('')
 
 const canSend = computed(() => inputText.value.trim().length > 0 && !props.disabled)
 
-function toggleMode() {
-  inputMode.value = inputMode.value === 'text' ? 'voice' : 'text'
-}
-
 function handleSend() {
   const text = inputText.value.trim()
   if (!text || props.disabled) return

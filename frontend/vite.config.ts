@@ -12,6 +12,7 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    host: '0.0.0.0', // ★ 允许局域网手机访问
     https: true, // ★ 手机端 getUserMedia 必须 HTTPS
     proxy: {
       '/api': {

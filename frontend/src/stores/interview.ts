@@ -145,7 +145,7 @@ export const useInterviewStore = defineStore('interview', () => {
     isLoading.value = true
     try {
       const res = await listInterviewSessionsApi(page, pageSize)
-      historyList.value = res.data.data || res.data.items || []
+      historyList.value = res.data.items || []
       historyTotal.value = res.data.total || 0
     } finally {
       isLoading.value = false

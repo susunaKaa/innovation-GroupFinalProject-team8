@@ -99,8 +99,13 @@ class RecordingAgent(BaseAgent):
 
     def __init__(self):
         super().__init__(name="recording_agent")
+        api_key = str(settings.DASHSCOPE_API_KEY).strip()
+        if not api_key:
+            raise RuntimeError(
+                "DashScope API Key 未配置，请在 .env 中设置 DASHSCOPE_API_KEY"
+            )
         self._headers = {
-            "Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "X-DashScope-Async": "enable",  # 异步模式（不传则走同步，免费套餐不支持同步 → 403）
             "X-DashScope-OssResourceResolve": "enable",  # 解析 oss:// URL（不传 → FILE_DOWNLOAD_FAILED）
@@ -129,7 +134,7 @@ class RecordingAgent(BaseAgent):
         async with httpx.AsyncClient(timeout=30) as client:
             policy_resp = await client.get(
                 f"{DASHSCOPE_BASE}/uploads",
-                headers={"Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}"},
+                headers={"Authorization": f"Bearer {str(settings.DASHSCOPE_API_KEY)}"},
                 params={
                     "action": "getPolicy",
                     "model": settings.PARAFOUNDER_MODEL,
@@ -258,11 +263,55 @@ class RecordingAgent(BaseAgent):
 
         raise RuntimeError(f"转写任务超时（等待超过 {max_attempts * poll_interval} 秒）")
 
+    def _convert_to_wav(self, file_path: str) -> str:
+        """
+        将音频文件转换为 WAV 格式（DashScope Paraformer 对 webm/opus 支持不佳）
+
+        Args:
+            file_path: 原始音频文件路径（如 .webm）
+
+        Returns:
+            str: 转换后的 WAV 文件路径（如果无需转换则返回原路径）
+        """
+        import subprocess
+
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in (".wav", ".mp3", ".m4a", ".flac"):
+            print(f"[录音Agent] 音频格式 {ext} 无需转换")
+            return file_path
+
+        wav_path = os.path.splitext(file_path)[0] + ".wav"
+        print(f"[录音Agent] 转换音频 {os.path.basename(file_path)} → WAV")
+
+        try:
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-i", file_path,
+                    "-ar", "16000",
+                    "-ac", "1",
+                    "-f", "wav",
+                    wav_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"ffmpeg 转换失败: {result.stderr}")
+            print(f"[录音Agent] 转换完成: {os.path.basename(wav_path)} ({os.path.getsize(wav_path)} bytes)")
+            return wav_path
+        except FileNotFoundError:
+            raise RuntimeError(
+                "ffmpeg 未安装。请在 Dockerfile 中添加 ffmpeg 或安装后重试。"
+            )
+
     async def transcribe(self, file_path: str) -> dict[str, Any]:
         """
         使用 Paraformer-v2 异步转写音视频文件
 
         流程：
+        0. 如果是 webm/ogg 等格式 → 用 ffmpeg 转 WAV
         1. 上传文件到 OSS → 获取 oss:// URL
         2. 通过 RESTful API 提交异步转写任务
         3. 轮询等待任务完成
@@ -274,8 +323,11 @@ class RecordingAgent(BaseAgent):
         Returns:
             dict: {"text": "...", "segments": [...], "duration_seconds": int}
         """
+        # 步骤0：格式转换（webm/opus → wav）
+        upload_file = self._convert_to_wav(file_path)
+
         # 步骤1：上传文件到 OSS
-        oss_url = await self._upload_file_to_oss(file_path)
+        oss_url = await self._upload_file_to_oss(upload_file)
 
         # 步骤2：提交转写任务
         task_id = await self._submit_transcription_task(oss_url)
@@ -286,6 +338,10 @@ class RecordingAgent(BaseAgent):
         task_status = result_data["output"]["task_status"]
         if task_status != "SUCCEEDED":
             message = result_data["output"].get("message", "未知错误")
+            # 特殊处理：音频太短或无有效语音片段时，返回空文本而非抛异常
+            if "NO_VALID_FRAGMENT" in message or "SUCCESS_WITH_NO_VALID" in message:
+                print(f"[录音Agent] 转写结果: 未检测到有效语音（可能录音太短或太静音），返回空文本")
+                return {"text": "", "segments": [], "duration_seconds": 0}
             raise RuntimeError(f"转写任务失败: {task_status} - {message}")
 
         # 步骤4：解析结果，获取 transcription_url
